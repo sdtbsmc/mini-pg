@@ -1,22 +1,25 @@
 [Unit]
-Description="MiniPG Service"
-Wants=network-online.target 
-After=network-online.target
+Description=MiniPg Service
+After=network.target
 
 [Service]
 Type=forking
-WorkingDirectory=/etc/bfm/minipg
+
 User=postgres
 Group=postgres
+WorkingDirectory=/etc/bfm/minipg
 
+# PID dosyasını systemd'ye bildirerek sürecin doğru izlenmesini sağlıyoruz
+PIDFile=/etc/bfm/minipg/minipg.pid
+
+# Script çalıştırma tanımları
 ExecStart=/etc/bfm/minipg/minipg.sh start
 ExecStop=/etc/bfm/minipg/minipg.sh stop
-ExecReload=/etc/bfm/minipg/minipg.sh reload
+ExecReload=/etc/bfm/minipg/minipg.sh restart
 
-Restart=always
+# Uygulama çökerse otomatik olarak yeniden başlatır
+Restart=on-failure
+RestartSec=5s
 
 [Install]
-WantedBy=sysinit.target
-Alias=minipg.service
-
-
+WantedBy=multi-user.target
