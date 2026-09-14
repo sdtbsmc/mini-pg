@@ -13,19 +13,18 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -402,46 +401,134 @@ public class MiniPGHelper {
                     log.info("There is no space for data directory back on disk "+ miniPGlocalSetings.getPostgresDataPath().substring(0,miniPGlocalSetings.getPostgresDataPath().indexOf("/", 1)));
                 }
                 
+                String hostname = "";        
                 try {
-                    log.info(String.valueOf(logNumber++)+". step : pb_basebackup starting...");
-                    String command = "rm -rf {PG_DATA} && {PG_BIN_PATH}/pg_basebackup -h {MASTER_IP} -p {MASTER_PORT} -U {REPLICATION_USER} -Fp -Xs -R -D {PG_DATA}"
-                                        .replace("{PG_DATA}",miniPGlocalSetings.getPostgresDataPath())
-                                        .replace("{PG_BIN_PATH}",(miniPGlocalSetings.getPgCtlBinPath().endsWith("/") ? miniPGlocalSetings.getPgCtlBinPath().substring(0, miniPGlocalSetings.getPgCtlBinPath().length()-1) : miniPGlocalSetings.getPgCtlBinPath() ))
-                                        .replace("{MASTER_IP}",rebaseUpDTO.getMasterIp())
-                                        .replace("{MASTER_PORT}",rebaseUpDTO.getMasterPort())
-                                        .replace("{REPLICATION_USER}",rebaseUpDTO.getRepUser());
-                    log.info("command executing:"+ command);
-                    ProcessBuilder pb = new ProcessBuilder("/bin/bash", "-c", command);
-                    pb.environment().put("PGPASSWORD", rebaseUpDTO.getRepPassword());
-                    Process process = pb.start();
+                    hostname = InetAddress.getLocalHost().getHostName();
+                } catch (UnknownHostException e) {
+                    e.printStackTrace();
+                }
+                
+                if (hostname == " " || hostname == null){
+                    String[] cmd = {"hostname"};
+                    try {
+                        hostname = new BufferedReader(
+                                new InputStreamReader(Runtime.getRuntime().exec(cmd).getInputStream()))
+                            .readLine();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+                try {
+                    log.info(String.valueOf(logNumber++) + ". step : pg_basebackup starting...");
+                    
+                    String pgData = miniPGlocalSetings.getPostgresDataPath();
+                    String pgBin = miniPGlocalSetings.getPgCtlBinPath();
+                    if (pgBin.endsWith("/")) {
+                        pgBin = pgBin.substring(0, pgBin.length() - 1);
+                    }
+                    String basebackupBin = pgBin + "/pg_basebackup";
 
-                    BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        log.info(line);
+                    // 1. Önce eski/bozuk datayı temizle
+                    new ScriptExecutor().executeScript("rm", "-rf", pgData);
+
+                    // 2. ProcessBuilder ile parametreleri güvenli şekilde oluştur
+                    ProcessBuilder pb = new ProcessBuilder(
+                            basebackupBin,
+                            "-h", rebaseUpDTO.getMasterIp(),
+                            "-p", rebaseUpDTO.getMasterPort(),
+                            "-U", rebaseUpDTO.getRepUser(),
+                            "-Fp", "-Xs", "-R", "-P", 
+                            "-c", "fast",
+                            "-D", pgData
+                    );
+
+                    // Stderr ve Stdout birleştirilerek deadlock önleniyor
+                    pb.redirectErrorStream(true);
+
+                    pb.environment().put("PGPASSWORD", rebaseUpDTO.getRepPassword());
+                    if (hostname != null && !hostname.trim().isEmpty()) {
+                        pb.environment().put("PGAPPNAME", hostname);
                     }
 
-                    // Hata çıktısını oku (stderr)
-                    BufferedReader errorReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
-                    while ((line = errorReader.readLine()) != null) {
-                        log.error(line);
+                    Process process = pb.start();
+
+                    // Logları canlı oku
+                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            log.info("[pg_basebackup] " + line);
+                        }
                     }
 
                     int exitCode = process.waitFor();
                     log.info("pg_basebackup exit code: " + exitCode);
 
-                    // 2.3 start the server
-                    log.info(String.valueOf(logNumber++)+". step : start server");
+                    if (exitCode != 0) {
+                        log.error("pg_basebackup failed with exit code " + exitCode);
+                        return "pg_basebackup failed";
+                    }
+
+                    // 3. Sunucuyu başlat
+                    log.info(String.valueOf(logNumber++) + ". step : start server");
                     this.startPG();
-                    
-                    Boolean isReplicationUp  = instructionFacate.checkReplication(rebaseUpDTO.getMasterIp(), rebaseUpDTO.getMasterPort(), rebaseUpDTO.getRepUser(), rebaseUpDTO.getRepPassword());
-                    if ( isReplicationUp == Boolean.FALSE){
+
+                    Boolean isReplicationUp = instructionFacate.checkReplication(
+                            rebaseUpDTO.getMasterIp(),
+                            rebaseUpDTO.getMasterPort(),
+                            rebaseUpDTO.getRepUser(),
+                            rebaseUpDTO.getRepPassword()
+                    );
+
+                    if (Boolean.FALSE.equals(isReplicationUp)) {
                         return null;
                     }
                     return "OK";
+
                 } catch (Exception ex) {
+                    log.error("Error during rebaseUp execution", ex);
                     return null;
                 }
+                // try {
+                //     log.info(String.valueOf(logNumber++)+". step : pb_basebackup starting...");
+                //     String command = "rm -rf {PG_DATA} && {PG_BIN_PATH}/pg_basebackup -h {MASTER_IP} -p {MASTER_PORT} -U {REPLICATION_USER} -Fp -Xs -R -D {PG_DATA}"
+                //                         .replace("{PG_DATA}",miniPGlocalSetings.getPostgresDataPath())
+                //                         .replace("{PG_BIN_PATH}",(miniPGlocalSetings.getPgCtlBinPath().endsWith("/") ? miniPGlocalSetings.getPgCtlBinPath().substring(0, miniPGlocalSetings.getPgCtlBinPath().length()-1) : miniPGlocalSetings.getPgCtlBinPath() ))
+                //                         .replace("{MASTER_IP}",rebaseUpDTO.getMasterIp())
+                //                         .replace("{MASTER_PORT}",rebaseUpDTO.getMasterPort())
+                //                         .replace("{REPLICATION_USER}",rebaseUpDTO.getRepUser());
+                //     log.info("command executing:"+ command);
+                //     ProcessBuilder pb = new ProcessBuilder("/bin/bash", "-c", command);
+                //     pb.environment().put("PGPASSWORD", rebaseUpDTO.getRepPassword());
+                //     pb.environment().put("PGAPPNAME", hostname);
+                //     Process process = pb.start();
+
+                //     BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+                //     String line;
+                //     while ((line = reader.readLine()) != null) {
+                //         log.info(line);
+                //     }
+
+                //     // Hata çıktısını oku (stderr)
+                //     BufferedReader errorReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+                //     while ((line = errorReader.readLine()) != null) {
+                //         log.error(line);
+                //     }
+
+                //     int exitCode = process.waitFor();
+                //     log.info("pg_basebackup exit code: " + exitCode);
+
+                //     // 2.3 start the server
+                //     log.info(String.valueOf(logNumber++)+". step : start server");
+                //     String start_result = this.startPG();
+                    
+                //     Boolean isReplicationUp  = instructionFacate.checkReplication(rebaseUpDTO.getMasterIp(), rebaseUpDTO.getMasterPort(), rebaseUpDTO.getRepUser(), rebaseUpDTO.getRepPassword());
+                //     if ( isReplicationUp == Boolean.FALSE){
+                //         return null;
+                //     }
+                //     return "OK";
+                // } catch (Exception ex) {
+                //     return null;
+                // }
             } 
             catch (Exception ex) {
                 return null;
@@ -450,6 +537,91 @@ public class MiniPGHelper {
 
         return "OK";
     }
+
+    private static String normalizePath(String path) {
+        if (path == null || path.isEmpty()) return "";
+        // Yolun sonundaki tüm '/' karakterlerini temizler
+        return path.replaceAll("/+$", "");
+    }
+
+    public Integer check_pg_process_is_active() {
+        String dataDir = this.miniPGlocalSetings.getPostgresDataPath();
+        if (dataDir == null) return -1;
+
+        Path pidFilePath = Paths.get(dataDir, "postmaster.pid");
+
+        if (Files.exists(pidFilePath)) {
+            try {
+                List<String> lines = Files.readAllLines(pidFilePath);
+                if (!lines.isEmpty()) {
+                    long pid = Long.parseLong(lines.get(0).trim());
+                    Optional<ProcessHandle> ph = ProcessHandle.of(pid);
+                    
+                    if (ph.isPresent() && ph.get().isAlive()) {
+                        return (int) pid;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        String targetNormalized = normalizePath(dataDir);
+
+        OptionalLong pidOptional = ProcessHandle.allProcesses()
+                .filter(ph -> ph.info().command().map(cmd -> cmd.contains("postgres")).orElse(false))
+                .filter(ph -> {
+                    String[] args = ph.info().arguments().orElse(new String[0]);
+                    for (int i = 0; i < args.length; i++) {
+                        String currentArg = args[i];
+                        
+                        if (("-D".equals(currentArg) || "--datadir".equals(currentArg)) && i + 1 < args.length) {
+                            if (targetNormalized.equals(normalizePath(args[i + 1]))) return true;
+                        } else if (currentArg.startsWith("-D=") || currentArg.startsWith("--datadir=")) {
+                            String[] parts = currentArg.split("=", 2);
+                            if (parts.length > 1 && targetNormalized.equals(normalizePath(parts[1]))) return true;
+                        }
+                    }
+                    return false;
+                })
+                .mapToLong(ProcessHandle::pid)
+                .findFirst();
+
+        return (int) pidOptional.orElse(-1);
+    }
+    // public Integer check_pg_porcess_is_active(){
+    //     String dataDir = this.miniPGlocalSetings.getPostgresDataPath();
+    //     if (dataDir == null) return -1;
+        
+    //     String targetNormalized = normalizePath(dataDir);
+
+    //     OptionalLong pidOptional = ProcessHandle.allProcesses()
+    //             .filter(ph -> ph.info().command().map(cmd -> cmd.endsWith("/postgres")).orElse(false))
+    //             .filter(ph -> {
+    //                 String[] args = ph.info().arguments().orElse(new String[0]);
+    //                 for (int i = 0; i < args.length; i++) {
+    //                     String currentArg = args[i];
+                        
+    //                     // "-D /path" veya "--datadir /path" kullanımı
+    //                     if (("-D".equals(currentArg) || "--datadir".equals(currentArg)) && i + 1 < args.length) {
+    //                         if (targetNormalized.equals(normalizePath(args[i + 1]))) {
+    //                             return true;
+    //                         }
+    //                     } 
+    //                     // "-D=/path" veya "--datadir=/path" kullanımı
+    //                     else if (currentArg.startsWith("-D=") || currentArg.startsWith("--datadir=")) {
+    //                         String[] parts = currentArg.split("=", 2);
+    //                         if (parts.length > 1 && targetNormalized.equals(normalizePath(parts[1]))) {
+    //                             return true;
+    //                         }
+    //                     }
+    //                 }
+    //                 return false;
+    //             })
+    //             .mapToLong(ProcessHandle::pid)
+    //             .findFirst();
+
+    //     return (int) pidOptional.orElse(-1);
+    // }
 
     public String cleanOldBackups(){
         List<String> result = (new CommandExecutor()).executeCommandSync("/bin/bash",
@@ -511,32 +683,6 @@ public class MiniPGHelper {
                     "stop",
                     "-D" + miniPGlocalSetings.getPostgresDataPath());
 
-
-            //tablespace pathlerini temizlei path yoksa create et
-            rewindDTO.getTablespaceList().stream().forEach(dirPath -> {
-                Path path = Paths.get(dirPath);
-                try {
-                    if (Files.notExists(path)) {
-                        Files.createDirectories(path);
-                    } else {
-                        try (Stream<Path> files = Files.walk(path)
-                                .filter(p -> !p.equals(path))
-                                .sorted((a, b) -> b.compareTo(a))) {
-                            files.forEach(p -> {
-                                try {
-                                    Files.deleteIfExists(p);
-                                } catch (IOException e) {
-                                    log.error("Error deleting " + p + ": " + e.getMessage());
-                                }
-                            });
-                        }
-                    }
-                } catch (IOException e) {
-                    log.error("Error processing " + path + ": " + e.getMessage());
-                }             
-
-            });
-
             log.info(String.valueOf(logNumber++)+". step : do rewind");
             Boolean revindSuccess = instructionFacate.tryRewindSync(rewindDTO.getMasterIp(),rewindDTO.getPort(), rewindDTO.getUser(), rewindDTO.getPassword());
             
@@ -555,7 +701,8 @@ public class MiniPGHelper {
             instructionFacate.tryTouchingStandby();
 
             log.info(String.valueOf(logNumber++)+". step : start server");
-            this.startPG();       
+            this.startPG();
+            log.info("is PG UP :"+ isPGUp());       
             
         }
         Boolean isReplicationUp  = instructionFacate.checkReplication(rewindDTO.getMasterIp(),rewindDTO.getPort(), rewindDTO.getUser(), rewindDTO.getPassword());
@@ -564,7 +711,7 @@ public class MiniPGHelper {
         }
         
         log.info(String.valueOf(logNumber++)+". step : restore_command set");
-        List<String> result_ro = (new CommandExecutor()).executeCommandSync(
+        List<String> result_ro = (new CommandExecutor()).executeCommandSyncSafe(
             miniPGlocalSetings.getPgCtlBinPath() + "psql","-p",miniPGlocalSetings.getPg_port(), 
                                                         "-U", miniPGlocalSetings.getReplicationUser(),
                                                         "-d", miniPGlocalSetings.getManagementDB(),
@@ -576,7 +723,7 @@ public class MiniPGHelper {
         } 
 
         log.info(String.valueOf(logNumber++)+". step : pg reload conf");
-        List<String> result_reload = (new CommandExecutor()).executeCommandSync(
+        List<String> result_reload = (new CommandExecutor()).executeCommandSyncSafe(
             miniPGlocalSetings.getPgCtlBinPath() + "psql","-p", miniPGlocalSetings.getPg_port(),
                                                             "-U", miniPGlocalSetings.getReplicationUser(),
                                                             "-d", miniPGlocalSetings.getManagementDB(), 
@@ -586,7 +733,8 @@ public class MiniPGHelper {
             log.info(" Error occurrred on pg_reload_conf, error:"+result_reload.toString());
             return result_reload.toString();
         } 
-
+        
+        log.info("Rewind process successfully completed and returning OK.");
         return "OK";
     }
 
@@ -921,7 +1069,6 @@ public class MiniPGHelper {
                 try {
                     Thread.sleep(1000);
                 } catch (InterruptedException e) {
-                    // TODO Auto-generated catch block
                     e.printStackTrace();
                 }
             }
@@ -938,49 +1085,86 @@ public class MiniPGHelper {
         return null;     
     }
 
+    public boolean isPostgresReady() {
+        String pgIsReadyBin = miniPGlocalSetings.getPostgresBinPath() + "/pg_isready";
+        try {
+            List<String> result = (new CommandExecutor()).executeCommandSync(
+                pgIsReadyBin,
+                "-h", "127.0.0.1",
+                "-p", String.valueOf(miniPGlocalSetings.getPg_port())
+            );
+            String output = String.join(" ", result);
+            return output.contains("accepting connections");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public boolean isPGUp() {
+        String pgCtlPath = miniPGlocalSetings.getPostgresBinPath() + "/pg_ctl";
+        ProcessBuilder processBuilder = new ProcessBuilder(pgCtlPath, "status", "-D", miniPGlocalSetings.getPostgresDataPath());
+        try {
+            Process process = processBuilder.start();
+            
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.toLowerCase().contains("server is running")) {
+                        return true;
+                    }
+                }
+            }
+
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.toLowerCase().contains("server is running")) {
+                        return true;
+                    }
+                }
+            }
+
+            int exitCode = process.waitFor();
+            return exitCode == 0;
+
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public String startPG() {
-        List<String> result = instructionFacate.startPGoverUserDaemon();
+        // 1. Servisi tetikle
+        instructionFacate.startPGoverUserDaemon();
         
-        int tryCount = 10;
+        int maxWaitSeconds = 30; // Maksimum bekleme süresi (sn)
+        int pollIntervalMs = 1000; // Kaç ms'de bir kontrol edilsin
+        long startTime = System.currentTimeMillis();
         boolean started = false;
 
-        while (tryCount > 0 && !started) {
+        log.info("PostgreSQL starting, waitng for ready...");
+
+        while ((System.currentTimeMillis() - startTime) < (maxWaitSeconds * 1000)) {
+            if (isPostgresReady()) {
+                started = true;
+                break;
+            }
+
             try {
-                log.info("PG is starting, please wait... Remaining attempts: " + tryCount);
-
-                result = (new CommandExecutor()).executeCommandSync(
-                        miniPGlocalSetings.getPgCtlBinPath() + "pg_ctl",
-                        "-D", miniPGlocalSetings.getPostgresDataPath(),
-                        "status"
-                );
-                log.info("PG is Started res:"+ String.join(" ", result));
-                // Çıktıda "server is running" geçiyorsa DB başlamış demektir
-                if (String.join(" ", result) != null && String.join(" ", result).contains("server is running")) {
-                    log.info("PostgreSQL started successfully.");
-                    started = true;
-                    break;
-                }
-
-                Thread.sleep(3000);
+                Thread.sleep(pollIntervalMs);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.error("Thread interrupted while waiting for PostgreSQL to start", e);
-                break;
-            } catch (Exception e) {
-                log.error("Error while checking PostgreSQL status", e);
-            } finally {
-                tryCount--;
+                log.error("PostgreSQL wait loop interreupted.", e);
+                return "INTERRUPTED";
             }
         }
 
-        if (!started) {
-            log.warn("PostgreSQL did not start within the expected time.");
-        }
-
-        if (String.join(" ", result) != null && String.join(" ", result).contains("server is running")) {
+        if (started) {
+            log.info("PostgreSQL started and accepting connections..");
             return "OK";
+        } else {
+            log.error("PostgreSQL not be ready given time period!", maxWaitSeconds);
+            return "TIMEOUT_OR_ERROR";
         }
-        return String.join(" ", result);
     }
 
     public String cleanPostgresAutoConf(){

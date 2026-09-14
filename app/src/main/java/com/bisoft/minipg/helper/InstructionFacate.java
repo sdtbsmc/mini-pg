@@ -4,6 +4,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -12,7 +14,6 @@ import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Scanner;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -485,6 +486,24 @@ public class InstructionFacate {
             log.warn("error on rejoin script file delete.");;
         }
 
+        String hostname = "";        
+        try {
+            hostname = InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        }
+        
+        if (hostname == " " || hostname == null){
+            String[] cmd = {"hostname"};
+            try {
+                hostname = new BufferedReader(
+                        new InputStreamReader(Runtime.getRuntime().exec(cmd).getInputStream()))
+                       .readLine();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
         try {
             final String pgData = miniPGlocalSetings.getPostgresDataPath();
             final String pgCtlBinPath = miniPGlocalSetings.getPgCtlBinPath();
@@ -493,6 +512,7 @@ public class InstructionFacate {
             FileOutputStream fos = new FileOutputStream(filename, false);
 
             fos.write("export PGPASSWORD={REPLICATION_PASSWORD}\n".replace("{REPLICATION_PASSWORD}",repPassword).getBytes());
+            fos.write("export PGAPPNAME={REPLICATION_APPNAME}\n".replace("{REPLICATION_APPNAME}",hostname).getBytes());
             fos.write("rm -rf {PG_DATA}\n".replace("{PG_DATA}",pgData).getBytes());
             fos.write("/bin/bash -c \"{PG_BIN_PATH}/pg_basebackup -h {MASTER_IP} -p {MASTER_PORT} -U {REPLICATION_USER} -Fp -Xs -R -D {PG_DATA}\"\n"
                     .replace("{PG_DATA}",pgData)
@@ -679,6 +699,8 @@ public class InstructionFacate {
                 ExecStop={POSTGRES_BIN_PATH}pg_ctl stop -D {PG_DATA}
                 PIDFile={PG_DATA}/postmaster.pid
 
+                TimeoutStartSec=0
+
                 # Disable OOM kill on postgres main process
                 OOMScoreAdjust=-1000
                 Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj
@@ -703,6 +725,8 @@ public class InstructionFacate {
                 ExecStart={POSTGRES_BIN_PATH}postgres -D {PG_DATA}
                 ExecStop={POSTGRES_BIN_PATH}pg_ctl stop -D {PG_DATA}
                 PIDFile={PG_DATA}/postmaster.pid
+
+                TimeoutStartSec=0
 
                 # Disable OOM kill on postgres main process
                 OOMScoreAdjust=-1000
@@ -732,22 +756,13 @@ public class InstructionFacate {
             Paths.get(serviceFile).toFile().setExecutable(false, false);
             
             log.info("PG Service file created for minipg: " + serviceFile);
-            
-            // try {
-            //     // Systemd komutlarını çalıştır
-            //     List<String> result = (new CommandExecutor()).executeCommandStr("sudo loginctl enable-linger $USER && export XDG_RUNTIME_DIR=/run/user/$(id -u) && systemctl --user daemon-reload && systemctl --user enable postgresql_minipg.service && systemctl --user stop postgresql_minipg.service && systemctl --user start postgresql_minipg.service");
-            //     log.info("PG Start over user Daemon result:"+ String.join(" ", result));
-            // } catch (Exception e) {
-            //     log.info("error on user pg service start..");
-            // }
 
             String user = System.getProperty("user.name");
-
             String cmd = String.format(
                 "sudo loginctl enable-linger %s && " +
                 "export XDG_RUNTIME_DIR=/run/user/$(id -u %s) && " +
                 "systemctl --user daemon-reload && " +
-		"systemctl --user enable postgresql_"+miniPGlocalSetings.getPg_port()+"_minipg.service && " +
+		        "systemctl --user enable postgresql_"+miniPGlocalSetings.getPg_port()+"_minipg.service && " +
                 "systemctl --user stop postgresql_"+miniPGlocalSetings.getPg_port()+"_minipg.service && " +
                 "systemctl --user start postgresql_"+miniPGlocalSetings.getPg_port()+"_minipg.service",
                 user, user
@@ -760,13 +775,11 @@ public class InstructionFacate {
                                     .start();
                                     
             int exitCode = process.waitFor();
-            log.info("PG Start Daemnon ExitCode: " + exitCode);
-
+            log.info("PG Start Daemnon ExitCode: " + exitCode); 
             List<String> result = new ArrayList<String>();
             try {
                 result = (new CommandExecutor()).executeCommandSync(miniPGlocalSetings.getPgCtlBinPath()+"pg_ctl","-D", miniPGlocalSetings.getPostgresDataPath() , "status");
             } catch (Exception e) {
-                // TODO Auto-generated catch block
                 e.printStackTrace();
             }
             log.info("startPG over user daemon result:"+ String.join("\n",result));

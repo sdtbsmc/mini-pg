@@ -1,9 +1,6 @@
 package com.bisoft.minipg;
 
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InterfaceAddress;
@@ -22,7 +19,6 @@ import java.util.List;
 import java.util.Set;
 
 import org.apache.commons.io.IOUtils;
-import org.springframework.security.web.util.RedirectUrlBuilder;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -128,6 +124,20 @@ public class MiniPgController {
                 miniPGlocalSetings.getPgCtlBinPath() + "pg_ctl", "status",
                 "-D" + miniPGlocalSetings.getPostgresDataPath());
         return cellValues;
+    }
+
+    @RequestMapping(path = "/isPGUp", method = RequestMethod.GET)
+    public @ResponseBody boolean isPGUp() {
+        try {
+            return miniPGHelper.isPGUp();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    @RequestMapping(path = "/checkPgPrc", method = RequestMethod.GET)
+    public @ResponseBody Integer checkPgPrc() {
+        return miniPGHelper.check_pg_process_is_active();
     }
 
     @RequestMapping(path = "/encrypt-creditential", method = RequestMethod.POST)

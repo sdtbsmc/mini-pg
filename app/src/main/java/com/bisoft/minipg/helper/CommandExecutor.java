@@ -96,4 +96,50 @@ public class CommandExecutor {
 
         return cellValues;
     }
+
+    public List<String> executeCommandSyncSafe(String... args) {
+        List<String> cellValues = new ArrayList<>();
+        Process p = null;
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder(args);
+            // STDOUT ve STDERR akışlarını tek akışta birleştirerek buffer dolup kilitlenmesini engelliyoruz
+            pb.redirectErrorStream(true);
+
+            p = pb.start();
+
+            // ÖNEMLİ: Akış, waitFor() çağrılmadan ÖNCE okunur (Deadlock önleyici)
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    cellValues.add(line);
+                }
+            }
+
+            // Süreç takılmasına karşı 15 saniyelik zaman aşımı koruması
+            boolean finished = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
+
+            if (!finished) {
+                log.error("Command execution timed out! Killing process: {}", String.join(" ", args));
+                p.destroyForcibly();
+                cellValues.add("error: command execution timed out");
+                return cellValues;
+            }
+
+            int exitCode = p.exitValue();
+            if (exitCode != 0) {
+                log.warn("Command exited with code {}: {}", exitCode, String.join(" ", args));
+            }
+
+        } catch (Exception e) {
+            log.error("Exception during command execution: " + String.join(" ", args), e);
+            cellValues.add("error: " + e.getMessage());
+        } finally {
+            if (p != null && p.isAlive()) {
+                p.destroyForcibly();
+            }
+        }
+
+        return cellValues;
+    }
 }
