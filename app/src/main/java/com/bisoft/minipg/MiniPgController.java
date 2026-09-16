@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.commons.io.IOUtils;
 import org.springframework.stereotype.Controller;
@@ -366,53 +367,61 @@ public class MiniPgController {
 
     @RequestMapping(path="/updatepgpass", method = RequestMethod.POST)
     public @ResponseBody String updatePGPass(@RequestBody String pgpassStr){
-        if (!(pgpassStr.contains(","))){
-            pgpassStr += ",";
+        if (pgpassStr == null || pgpassStr.trim().isEmpty()) {
+            return "ERR";
         }
-        List<String> newEntries = Arrays.asList(pgpassStr.split(","));
+
+        List<String> newEntries = Arrays.stream(pgpassStr.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .distinct()
+                .collect(Collectors.toList());
 
         String homeDir = System.getProperty("user.home");
         Path pgpassPath = Paths.get(homeDir, ".pgpass");
+        
         try {
-            if (!Files.exists(pgpassPath)) {
-                Files.createFile(pgpassPath);
-                log.info(".pgpass filke created..");
-            }
-            List<String> existingLines = new ArrayList<>();
-            if (Files.exists(pgpassPath)) {
-                existingLines = Files.readAllLines(pgpassPath);
-            }
+            List<String> existingLines = Files.exists(pgpassPath) 
+                    ? Files.readAllLines(pgpassPath) 
+                    : new ArrayList<>();
 
-            List<String> linesToAppend = new ArrayList<>();
-            for (String entry : newEntries) {
-                if (!existingLines.contains(entry)) {
-                    linesToAppend.add(entry);
-                }
-            }
+            Set<String> newKeys = newEntries.stream()
+                    .map(entry -> {
+                        String[] parts = entry.trim().split(":");
+                        return parts.length >= 4 
+                                ? String.join(":", parts[0], parts[1], parts[2], parts[3]) 
+                                : entry;
+                    })
+                    .collect(Collectors.toSet());
 
-            if (!linesToAppend.isEmpty()) {
-                Files.write(pgpassPath, linesToAppend, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-                // linesToAppend.forEach(System.out::println);
-            } else {
-                log.info("pgpass file already have values...");
-            }
+            List<String> updatedContent = existingLines.stream()
+                    .filter(line -> !line.trim().isEmpty())
+                    .filter(line -> {
+                        String[] parts = line.trim().split(":");
+                        String key = parts.length >= 4 
+                                ? String.join(":", parts[0], parts[1], parts[2], parts[3]) 
+                                : line;
+                        return !newKeys.contains(key);
+                    })
+                    .collect(Collectors.toList());
 
-            // // Dosya izinlerini ayarla (600 -> sadece kullanıcı okuyup yazabilir)
-            // File pgpassFile = pgpassPath.toFile();
-            // pgpassFile.setReadable(true, true);
-            // pgpassFile.setWritable(true, true);
-            // pgpassFile.setExecutable(false);
+            updatedContent.addAll(newEntries);
 
-            // 0600 => owner read & write only
+            Files.write(pgpassPath, updatedContent, 
+                    StandardOpenOption.CREATE, 
+                    StandardOpenOption.TRUNCATE_EXISTING, 
+                    StandardOpenOption.WRITE);
+
             Set<PosixFilePermission> perms = PosixFilePermissions.fromString("rw-------");
             Files.setPosixFilePermissions(pgpassPath, perms);
 
+            log.info(".pgpass file successfully updated.");
             return "OK";
+
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("Error updating .pgpass file", e);
             return "ERR";            
         }
-      
     }
 
     @RequestMapping(path = "/clearAutoConf", method = RequestMethod.GET)
