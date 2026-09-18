@@ -1091,7 +1091,9 @@ public class MiniPGHelper {
             List<String> result = (new CommandExecutor()).executeCommandSync(
                 pgIsReadyBin,
                 "-h", "127.0.0.1",
-                "-p", String.valueOf(miniPGlocalSetings.getPg_port())
+                "-p", String.valueOf(miniPGlocalSetings.getPg_port()),
+                "-U", miniPGlocalSetings.getReplicationUser(),
+                "-d", miniPGlocalSetings.getManagementDB()
             );
             String output = String.join(" ", result);
             return output.contains("accepting connections");
@@ -1133,15 +1135,14 @@ public class MiniPGHelper {
     }
 
     public String startPG() {
-        // 1. Servisi tetikle
         instructionFacate.startPGoverUserDaemon();
         
-        int maxWaitSeconds = 30; // Maksimum bekleme süresi (sn)
-        int pollIntervalMs = 1000; // Kaç ms'de bir kontrol edilsin
+        int maxWaitSeconds = 30;
+        int pollIntervalMs = 1000;
         long startTime = System.currentTimeMillis();
         boolean started = false;
 
-        log.info("PostgreSQL starting, waitng for ready...");
+        log.info("PostgreSQL starting, waiting for process to run...");
 
         while ((System.currentTimeMillis() - startTime) < (maxWaitSeconds * 1000)) {
             if (isPostgresReady()) {

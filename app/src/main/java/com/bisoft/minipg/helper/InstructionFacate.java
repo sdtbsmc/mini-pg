@@ -776,13 +776,26 @@ public class InstructionFacate {
                                     
             int exitCode = process.waitFor();
             log.info("PG Start Daemnon ExitCode: " + exitCode); 
+
             List<String> result = new ArrayList<String>();
             try {
-                result = (new CommandExecutor()).executeCommandSync(miniPGlocalSetings.getPgCtlBinPath()+"pg_ctl","-D", miniPGlocalSetings.getPostgresDataPath() , "status");
+                String pgCtlBin = miniPGlocalSetings.getPgCtlBinPath();
+                if (!pgCtlBin.endsWith("/")) {
+                    pgCtlBin += "/";
+                }
+                String pgCtlExecutable = pgCtlBin + "pg_ctl";
+
+                result = (new CommandExecutor()).executeCommandSync(
+                    pgCtlExecutable,
+                    "status",
+                    "-D",
+                    miniPGlocalSetings.getPostgresDataPath()
+                );
             } catch (Exception e) {
-                e.printStackTrace();
+                log.error("pg_ctl status command error occurred", e);
             }
-            log.info("startPG over user daemon result:"+ String.join("\n",result));
+
+            log.info("startPG over user daemon result:\n" + String.join("\n", result));
             return result;
         } catch (IOException e) {
             e.printStackTrace();
